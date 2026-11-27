@@ -1,1 +1,1 @@
-cool frontend for bridge sim!
+apparently this has to be public
