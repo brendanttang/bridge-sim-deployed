@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>bridge sim</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/pyodide/v314.0.8/full/pyodide.js"></script>
+</head>
+<body>
+
+<header>
+<h1>bridge sim</h1>
+<p>team 809</p>
+</header>
+
+<div class="controls">
+design: <select id="design"></select>
+load case:
+<select id="lc">
+  <option>LC1</option>
+  <option>LC2_base</option>
+</select>
+<button id="go" onclick="run()">test it</button>
+<span id="log"></span>
+</div>
+
+<div id="results" hidden>
+
+<section id="res">
+<h2>results</h2>
+<table id="table" border="1"></table>
+<p id="sentence"></p>
+</section>
+
+<section id="train">
+<h2>the train</h2>
+<canvas id="canvas" width="900" height="230"></canvas>
+<p>
+<input type="range" id="slider" min="0" max="2056" value="0" oninput="draw()">
+front wheel at x = <span id="pos">0</span> mm
+</p>
+<p class="buttons">
+<button onclick="play()">play</button>
+<button onclick="pause()">pause</button>
+<button onclick="goToMaxM()">max M</button>
+<button onclick="goToMaxV()">max V</button>
+</p>
+<p id="reactions"></p>
+</section>
+
+<section id="graphs">
+<h2>graphs</h2>
+<img id="plots">
+</section>
+
+</div>
+
+<script>
+var data = null;      // the answer from calc_web.py run()
+var timer = null;     // for the play button
+
+// say something in the log (only the newest 2 lines are kept so it fits)
+var lines = [];
+function say(text) {
+  lines.unshift(text);
+  if (lines.length > 2) {
+    lines.pop();
+  }
+  document.getElementById("log").innerHTML = lines.join("<br>");
+}
+
+// where the files are (everything sits next to this page)
+var ALGORITHM = "algorithm.py";
+var DESIGNS = ["design0", "FINAL-DESIGN.csv", "main-iteration-1.csv", "main-iteration-2.csv"];
+
+// fill the design dropdown
+var select = document.getElementById("design");
+for (var i = 0; i < DESIGNS.length; i++) {
+  var option = document.createElement("option");
+  option.text = DESIGNS[i];
+  select.add(option);
+}
+
+// gets a file as text
+async function getText(file) {
+  var r = await fetch(file);
+  if (!r.ok) {
+    throw new Error("couldn't find " + file);
+  }
+  return await r.text();
+}
+
+// gives the browser a moment to show the newest log line before python freezes the page
+function breathe() {
+  return new Promise(function (resolve) { setTimeout(resolve, 50); });
+}
+
+// python in the browser. only started the first time someone presses the button
+var py = null;
+async function startPython() {
+  say("waking up python. the first time takes a while...");
+  await breathe();
+  py = await loadPyodide();
+  await py.loadPackage(["numpy", "matplotlib"]);
+  py.FS.writeFile("algorithm.py", await getText(ALGORITHM));
+  py.FS.writeFile("calc_web.py", await getText("calc_web.py"));
+  py.runPython("import os, sys\nos.environ['MPLBACKEND'] = 'Agg'\nsys.path.insert(0, '.')\nimport calc_web");
+}
+
+async function run() {
+  var button = document.getElementById("go");
+  button.disabled = true;
+  try {
+    if (py == null) {
+      await startPython();
+    }
+    var design = document.getElementById("design").value;
+    var lc = document.getElementById("lc").value;
+    say("the train sets off over " + design + "...");
+    await breathe();
+
+    var csv = "";
+    if (design != "design0") {
+      csv = await getText(design);
+    }
+    py.globals.set("csv_text", csv);
+    py.globals.set("load_case", lc);
+    data = JSON.parse(py.runPython("calc_web.run(csv_text, load_case)"));
+
+    showTable();
+    document.getElementById("slider").max = data.L + data.offsets[data.offsets.length - 1];
+    draw();
+
+    // the graphs: python saved plots.png in its own pretend file system
+    var png = py.FS.readFile("plots.png");
+    var blob = new Blob([png], { type: "image/png" });
+    document.getElementById("plots").src = URL.createObjectURL(blob);
+
+    document.getElementById("results").hidden = false;
+    say("the bridge holds " + data.fail_load.toFixed(0) + " N.");
+  } catch (e) {
+    say("something broke: " + e.message);
+  }
+  button.disabled = false;
+}
+
+function showTable() {
+  var html = "<tr><th>Case</th><th>Failure</th><th>Applied (MPa)</th><th>Crit (MPa)</th><th>FOS</th></tr>";
+  for (var i = 0; i < data.table.length; i++) {
+    var row = data.table[i];
+    if (i == data.worst) {
+      html += "<tr bgcolor='#ffcccc'>";
+    } else {
+      html += "<tr>";
+    }
+    html += "<td>" + row[0] + "</td>";
+    html += "<td>" + row[1] + "</td>";
+    html += "<td>" + row[2].toFixed(3) + "</td>";
+    html += "<td>" + row[3].toFixed(3) + "</td>";
+    html += "<td>" + row[4].toFixed(3) + "</td>";
+    html += "</tr>";
+  }
+  document.getElementById("table").innerHTML = html;
+
+  var worst = data.table[data.worst];
+  document.getElementById("sentence").innerHTML = "Minimum FOS = " + worst[4].toFixed(3) + " (" + worst[1].toLowerCase() + "), so the failure load is " + data.fail_load.toFixed(3) + " N";
+}
+
+// mm along the bridge -> pixels on the canvas. we show from x = -200 to 1400
+function px(xmm) {
+  return 30 + (xmm + 200) * 840 / 1600;
+}
+
+// draws an arrow from (x1, y1) to (x2, y2), head at the end
+function arrow(ctx, x1, y1, x2, y2) {
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  var dir = 1;
+  if (y2 < y1) { dir = -1; }
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - 5, y2 - 8 * dir);
+  ctx.lineTo(x2 + 5, y2 - 8 * dir);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function draw() {
+  if (data == null) { return; }
+  var lead = Number(document.getElementById("slider").value);
+  document.getElementById("pos").innerHTML = lead;
+
+  var canvas = document.getElementById("canvas");
+  var ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = "12px serif";
+  ctx.textAlign = "center";
+  var deckY = 140;
+
+  // the ground the train rolls on before and after the bridge
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px(-200), deckY);
+  ctx.lineTo(px(1400), deckY);
+  ctx.stroke();
+
+  // the bridge
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(px(0), deckY);
+  ctx.lineTo(px(data.L), deckY);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+
+  // supports (little triangles)
+  var supports = [0, data.L];
+  for (var s = 0; s < 2; s++) {
+    ctx.beginPath();
+    ctx.moveTo(px(supports[s]), deckY + 2);
+    ctx.lineTo(px(supports[s]) - 8, deckY + 16);
+    ctx.lineTo(px(supports[s]) + 8, deckY + 16);
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  // wheels, and the reactions from the ones on the bridge
+  var total = 0;
+  var moment = 0;
+  for (var i = 0; i < data.offsets.length; i++) {
+    var x = lead - data.offsets[i];
+    var load = data.loads[i];
+    if (x < -200 || x > 1400) { continue; }
+
+    ctx.beginPath();
+    ctx.arc(px(x), deckY, 4, 0, 2 * Math.PI);
+    ctx.fill();
+
+    if (x >= 0 && x <= data.L) {
+      arrow(ctx, px(x), deckY - 70, px(x), deckY - 6);
+      ctx.fillText(load.toFixed(1) + " N", px(x), deckY - 76);
+      total += load;
+      moment += load * x;
+    }
+  }
+
+  var right = moment / data.L;
+  var left = total - right;
+
+  // reaction arrows (pointing up)
+  if (total > 0) {
+    arrow(ctx, px(0), deckY + 70, px(0), deckY + 20);
+    ctx.fillText(left.toFixed(1) + " N", px(0), deckY + 84);
+    arrow(ctx, px(data.L), deckY + 70, px(data.L), deckY + 20);
+    ctx.fillText(right.toFixed(1) + " N", px(data.L), deckY + 84);
+  }
+
+  document.getElementById("reactions").innerHTML = "left reaction = " + left.toFixed(3) + " N, right reaction = " + right.toFixed(3) + " N";
+}
+
+function play() {
+  var slider = document.getElementById("slider");
+  if (Number(slider.value) >= Number(slider.max)) {
+    slider.value = 0;
+  }
+  pause();
+  timer = setInterval(function () {
+    slider.value = Number(slider.value) + 8;
+    draw();
+    if (Number(slider.value) >= Number(slider.max)) {
+      pause();
+    }
+  }, 20);
+}
+
+function pause() {
+  clearInterval(timer);
+  timer = null;
+}
+
+function goToMaxM() {
+  pause();
+  document.getElementById("slider").value = data.lead_M;
+  draw();
+}
+
+function goToMaxV() {
+  pause();
+  document.getElementById("slider").value = data.lead_V;
+  draw();
+}
+</script>
+
+</body>
+</html>

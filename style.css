@@ -1,0 +1,18 @@
+/* the only css: results top left, train top right, graphs along the bottom */
+#results {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+#results[hidden] {
+  display: none;
+}
+
+#graphs {
+  grid-column: 1 / 3;
+}
+
+/* so the train and graphs fit inside their part of the grid */
+canvas, img {
+  width: 100%;
+}
